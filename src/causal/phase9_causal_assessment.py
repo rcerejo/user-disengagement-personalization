@@ -1,0 +1,166 @@
+from pathlib import Path
+
+import pandas as pd
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RAW_DATA = PROJECT_ROOT / "data" / "raw" / "KuaiRand-Pure" / "data"
+REPORTS = PROJECT_ROOT / "reports"
+
+STANDARD_LATE_LOG = RAW_DATA / "log_standard_4_22_to_5_08_pure.csv"
+RANDOM_LATE_LOG = RAW_DATA / "log_random_4_22_to_5_08_pure.csv"
+FEATURE_TABLE = PROJECT_ROOT / "data" / "processed" / "phase3_user_behavior_features.csv"
+
+
+def load_log(path: Path, policy: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    df["policy"] = policy
+    df["event_time"] = pd.to_datetime(df["time_ms"], unit="ms")
+    df["event_date"] = pd.to_datetime(df["event_time"].dt.date)
+    return df
+
+
+def compare_late_policies() -> pd.DataFrame:
+    standard = load_log(STANDARD_LATE_LOG, "standard_recommendation")
+    random = load_log(RANDOM_LATE_LOG, "random_exposure")
+    combined = pd.concat([standard, random], ignore_index=True)
+
+    return (
+        combined.groupby("policy")
+        .agg(
+            events=("user_id", "size"),
+            users=("user_id", "nunique"),
+            videos=("video_id", "nunique"),
+            active_days=("event_date", "nunique"),
+            click_rate=("is_click", "mean"),
+            long_view_rate=("long_view", "mean"),
+            like_rate=("is_like", "mean"),
+            hate_rate=("is_hate", "mean"),
+            mean_events_per_user=("user_id", lambda x: len(x) / x.nunique()),
+        )
+        .reset_index()
+    )
+
+
+def overlap_summary() -> pd.DataFrame:
+    standard = pd.read_csv(STANDARD_LATE_LOG, usecols=["user_id", "video_id"])
+    random = pd.read_csv(RANDOM_LATE_LOG, usecols=["user_id", "video_id"])
+    standard_users = set(standard["user_id"])
+    random_users = set(random["user_id"])
+    standard_videos = set(standard["video_id"])
+    random_videos = set(random["video_id"])
+
+    return pd.DataFrame(
+        [
+            {
+                "standard_late_users": len(standard_users),
+                "random_late_users": len(random_users),
+                "overlap_users": len(standard_users & random_users),
+                "standard_late_videos": len(standard_videos),
+                "random_late_videos": len(random_videos),
+                "overlap_videos": len(standard_videos & random_videos),
+            }
+        ]
+    )
+
+
+def causal_question_assessment() -> pd.DataFrame:
+    rows = [
+        {
+            "candidate_question": "Does the proposed SVD personalization strategy improve retention?",
+            "treatment": "Receiving the proposed SVD-informed personalized feed",
+            "outcome": "7-day observed return or future disengagement",
+            "data_support": "Not supported by existing logs",
+            "reason": "Users were not randomized to our proposed personalization strategy versus control.",
+            "decision": "Do not estimate causal effect from KuaiRand-Pure.",
+        },
+        {
+            "candidate_question": "Do standard recommendations cause higher engagement than random exposure?",
+            "treatment": "Standard recommendation exposure versus random exposure",
+            "outcome": "Click or long-view on the exposed video",
+            "data_support": "Partially informative but not a clean causal design for retention",
+            "reason": "Random exposure helps reveal engagement under less algorithmic selection, but standard and random events may differ in context, placement, timing, and policy rules.",
+            "decision": "Use descriptively to discuss exposure bias; avoid causal retention claims.",
+        },
+        {
+            "candidate_question": "Does declining activity cause disengagement?",
+            "treatment": "Decline in activity",
+            "outcome": "Observed non-return in the late standard period",
+            "data_support": "Not supported",
+            "reason": "Declining activity is not randomly assigned and may reflect hidden intent, external context, or prior dissatisfaction.",
+            "decision": "Treat as predictive association only.",
+        },
+        {
+            "candidate_question": "Would a re-entry feed reduce disengagement for high-risk users?",
+            "treatment": "Receiving a re-entry feed intervention",
+            "outcome": "Future return, long-view rate, or session frequency",
+            "data_support": "Requires new experiment",
+            "reason": "The intervention does not exist in the historical dataset.",
+            "decision": "Test with the Phase 8 A/B design.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def causal_requirements() -> pd.DataFrame:
+    rows = [
+        {
+            "requirement": "Well-defined treatment",
+            "status": "Missing for proposed personalization effect",
+            "explanation": "The dataset does not assign users to our proposed SVD or re-entry treatment.",
+        },
+        {
+            "requirement": "Comparable control group",
+            "status": "Missing",
+            "explanation": "Standard logs are generated by the existing recommender, not by a randomized control for our intervention.",
+        },
+        {
+            "requirement": "Pre-treatment confounders",
+            "status": "Partially available",
+            "explanation": "We have user behavior and metadata, but likely miss intent, context, notification exposure, device/session context, and external factors.",
+        },
+        {
+            "requirement": "Outcome measured after treatment",
+            "status": "Partially available",
+            "explanation": "Future observed activity is available, but not for a randomized personalization treatment.",
+        },
+        {
+            "requirement": "Credible identification assumption",
+            "status": "Not credible for retention impact",
+            "explanation": "Observational adjustment would require assuming no unobserved confounding, which is not defensible here.",
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def main() -> None:
+    REPORTS.mkdir(exist_ok=True)
+
+    policy_comparison = compare_late_policies()
+    overlap = overlap_summary()
+    questions = causal_question_assessment()
+    requirements = causal_requirements()
+
+    policy_comparison.to_csv(REPORTS / "phase9_late_policy_comparison.csv", index=False)
+    overlap.to_csv(REPORTS / "phase9_standard_random_overlap.csv", index=False)
+    questions.to_csv(REPORTS / "phase9_causal_question_assessment.csv", index=False)
+    requirements.to_csv(REPORTS / "phase9_causal_requirements.csv", index=False)
+
+    print("\n=== Late policy descriptive comparison ===")
+    print(policy_comparison.to_string(index=False))
+
+    print("\n=== Standard/random overlap ===")
+    print(overlap.to_string(index=False))
+
+    print("\n=== Causal question assessment ===")
+    print(questions.to_string(index=False))
+
+    print("\n=== Causal requirements assessment ===")
+    print(requirements.to_string(index=False))
+
+    print("\nConclusion: do not estimate a causal retention effect from this dataset.")
+    print("Use the Phase 8 A/B test design to measure causal impact in production.")
+
+
+if __name__ == "__main__":
+    main()
